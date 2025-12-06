@@ -813,6 +813,9 @@ ${city ? `User's current city filter: ${city}` : ''}`;
         });
     } catch (error) {
         console.error('Chat error:', error.message);
+        if (error.response) {
+            console.error('Groq API Response Error:', error.response.status, error.response.data);
+        }
         res.json({ role: 'assistant', content: "I'm having trouble connecting right now. Please try again." });
     }
 });
