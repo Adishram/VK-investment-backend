@@ -212,6 +212,28 @@ app.get('/api/health', (req, res) => {
     });
 });
 
+// Direct Groq API test endpoint
+app.get('/api/test-groq', async (req, res) => {
+    try {
+        const groqResponse = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
+            model: "llama-3.1-8b-instant",
+            messages: [{ role: 'user', content: 'Say hello in one word' }],
+            max_tokens: 10
+        }, { 
+            headers: { 'Authorization': `Bearer ${process.env.GROQ_API_KEY}` },
+            timeout: 10000
+        });
+        res.json({ success: true, response: groqResponse.data.choices[0].message.content });
+    } catch (error) {
+        res.json({ 
+            success: false, 
+            error: error.message,
+            response_status: error.response?.status,
+            response_data: error.response?.data
+        });
+    }
+});
+
 // Super Admin Login
 app.post('/api/super-admin/login', (req, res) => {
     const { email, password } = req.body;
