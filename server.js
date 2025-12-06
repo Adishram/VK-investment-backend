@@ -204,7 +204,12 @@ const hashPassword = (password) => {
 // --- API Routes ---
 
 app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', message: 'Server is running' });
+    res.json({ 
+        status: 'ok', 
+        message: 'Server is running',
+        groq_key_set: !!process.env.GROQ_API_KEY,
+        groq_key_length: process.env.GROQ_API_KEY ? process.env.GROQ_API_KEY.length : 0
+    });
 });
 
 // Super Admin Login
