@@ -88,6 +88,16 @@ const runMigrations = async () => {
             END $$;
         `);
         
+        // Populate gender based on PG title keywords
+        await pool.query(`
+            UPDATE pg_listings SET gender = 'women' 
+            WHERE LOWER(title) LIKE '%women%' OR LOWER(title) LIKE '%ladies%' OR LOWER(title) LIKE '%girl%' OR LOWER(title) LIKE '%female%';
+        `);
+        await pool.query(`
+            UPDATE pg_listings SET gender = 'men' 
+            WHERE LOWER(title) LIKE '%men%' OR LOWER(title) LIKE '%boys%' OR LOWER(title) LIKE '%male%' OR LOWER(title) LIKE '%gents%';
+        `);
+        
 
 
         // customers table (NEWLY ADDED)
@@ -1097,6 +1107,48 @@ app.put('/api/customer/:id/check-in-date', async (req, res) => {
         res.json(result.rows[0]);
     } catch (error) {
         console.error('Error updating check-in date:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
+    }
+});
+
+// Cancel Booking / Unsubscribe from PG
+app.delete('/api/customer/:id/cancel', async (req, res) => {
+    const { id } = req.params;
+    
+    try {
+        // Get customer details first to restore room count
+        const customerResult = await pool.query('SELECT * FROM customers WHERE id = $1', [id]);
+        if (customerResult.rows.length === 0) {
+            return res.status(404).json({ error: 'Booking not found' });
+        }
+        
+        const customer = customerResult.rows[0];
+        
+        // Restore room availability
+        if (customer.pg_id && customer.room_type) {
+            const pgResult = await pool.query('SELECT rooms FROM pg_listings WHERE id = $1', [customer.pg_id]);
+            if (pgResult.rows.length > 0 && pgResult.rows[0].rooms) {
+                let rooms = pgResult.rows[0].rooms;
+                if (typeof rooms === 'string') rooms = JSON.parse(rooms);
+                
+                if (Array.isArray(rooms)) {
+                    rooms = rooms.map(room => {
+                        if (room.type === customer.room_type) {
+                            return { ...room, available: (room.available || 0) + 1 };
+                        }
+                        return room;
+                    });
+                    await pool.query('UPDATE pg_listings SET rooms = $1 WHERE id = $2', [JSON.stringify(rooms), customer.pg_id]);
+                }
+            }
+        }
+        
+        // Delete customer record
+        await pool.query('DELETE FROM customers WHERE id = $1', [id]);
+        
+        res.json({ success: true, message: 'Booking cancelled successfully' });
+    } catch (error) {
+        console.error('Error cancelling booking:', error);
         res.status(500).json({ error: 'Internal Server Error' });
     }
 });
