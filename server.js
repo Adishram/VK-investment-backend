@@ -677,27 +677,123 @@ app.get('/api/pg/:id/reviews', async (req, res) => {
     }
 });
 
-// Groq Chat
+// Groq Chat - Enhanced with full context
 app.post('/api/chat', async (req, res) => {
-    const { message, history, context } = req.body;
+    const { message, history, userEmail, city } = req.body;
     const GROQ_API_KEY = process.env.GROQ_API_KEY;
-    if (!GROQ_API_KEY) return res.status(500).json({ role: 'assistant', content: "Server error: API Key missing." });
-
-    let systemPrompt = "You are a helpful assistant for 'Book My PGs'. When asked about PGs, do NOT list them in your text response, as they will be displayed visually to the user. Just provide a brief summary or answer specific questions about them.";
-    if (context && context.pgs) {
-        systemPrompt += `\n\nAvailable PGs (for your knowledge only, do not list them):\n${context.pgs.map(pg => `- ${pg.name}: ₹${pg.price}/mo, Location: ${pg.location}`).join('\n')}`;
+    
+    if (!GROQ_API_KEY) {
+        return res.status(500).json({ role: 'assistant', content: "Server error: API Key missing." });
     }
 
     try {
-        const response = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
+        // Fetch all PGs for context
+        const pgsResult = await pool.query('SELECT id, title, price, location, city, gender, food_included, amenities, rating FROM pg_listings ORDER BY rating DESC NULLS LAST');
+        const pgs = pgsResult.rows;
+        
+        // Build PG context string (concise format for speed)
+        const pgContext = pgs.map(pg => 
+            `ID:${pg.id}|${pg.title}|₹${pg.price}/mo|${pg.location},${pg.city}|${pg.gender || 'Any'}|Food:${pg.food_included ? 'Yes' : 'No'}|Rating:${pg.rating || 'New'}`
+        ).join('\n');
+
+        // Fetch user booking if email provided
+        let bookingContext = '';
+        let visitContext = '';
+        if (userEmail) {
+            const bookingResult = await pool.query(`
+                SELECT c.*, p.title as pg_title, p.location as pg_location, p.city as pg_city
+                FROM customers c
+                LEFT JOIN pg_listings p ON c.pg_id = p.id
+                WHERE c.email = $1
+                ORDER BY c.created_at DESC
+                LIMIT 1
+            `, [userEmail]);
+            
+            if (bookingResult.rows.length > 0) {
+                const b = bookingResult.rows[0];
+                bookingContext = `
+USER'S BOOKING:
+- PG Name: ${b.pg_title}
+- Location: ${b.pg_location}, ${b.pg_city}
+- Room: ${b.room_no || 'To be assigned'}
+- Floor: ${b.floor || 'To be assigned'}
+- Room Type: ${b.room_type || 'N/A'}
+- Move-in Date: ${b.move_in_date ? new Date(b.move_in_date).toLocaleDateString() : 'Not set'}
+- Payment Status: ${b.status}
+- Amount Paid: ₹${b.amount || 0}
+- Booking ID: ${b.booking_id || 'N/A'}`;
+            } else {
+                bookingContext = 'USER HAS NO BOOKINGS.';
+            }
+
+            // Get user's visit requests
+            const visitResult = await pool.query(`
+                SELECT vr.*, p.title as pg_title
+                FROM visit_requests vr
+                LEFT JOIN pg_listings p ON vr.pg_id = p.id
+                WHERE vr.user_email = $1
+                ORDER BY vr.created_at DESC
+                LIMIT 3
+            `, [userEmail]);
+
+            if (visitResult.rows.length > 0) {
+                visitContext = '\nUSER\'S SCHEDULED VISITS:';
+                visitResult.rows.forEach(v => {
+                    const statusLabel = v.status === 'pending' ? 'Waiting for approval' :
+                                        v.status === 'approved' ? 'Approved ✓' : 'Not approved ✗';
+                    visitContext += `\n- ${v.pg_title}: ${new Date(v.visit_date).toLocaleDateString()} at ${v.visit_time} - ${statusLabel}`;
+                });
+            }
+        }
+
+        // Build comprehensive system prompt
+        const systemPrompt = `You are a fast, helpful AI assistant for 'Book My PG', a PG accommodation booking app.
+
+RULES:
+1. Only help with PG-related queries (finding PGs, bookings, amenities, pricing, visits, etc.)
+2. Keep responses SHORT and concise (2-3 sentences max)
+3. When recommending PGs, output their IDs in this format at the END of your message: [PG_IDs: 1, 2, 3]
+4. NEVER list PG details in text - they will be shown as cards to the user
+5. For booking/visit queries, use the user's info below
+6. If asked about non-PG topics, politely redirect to PG-related help
+
+${bookingContext ? `${bookingContext}\n` : ''}${visitContext ? `${visitContext}\n` : ''}
+AVAILABLE PGs (ID|Name|Price|Location|Gender|Food|Rating):
+${pgContext}
+
+${city ? `User's current city filter: ${city}` : ''}`;
+
+        const groqResponse = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
             model: "llama-3.1-8b-instant",
-            messages: [{ role: "system", content: systemPrompt }, ...(history || []), { role: 'user', content: message }],
-            temperature: 0.7,
-            max_tokens: 1024
-        }, { headers: { 'Authorization': `Bearer ${GROQ_API_KEY}` } });
-        res.json(response.data.choices[0].message);
+            messages: [
+                { role: "system", content: systemPrompt },
+                ...(history || []).slice(-6), // Keep last 6 messages for context
+                { role: 'user', content: message }
+            ],
+            temperature: 0.5,
+            max_tokens: 300 // Shorter for speed
+        }, { 
+            headers: { 'Authorization': `Bearer ${GROQ_API_KEY}` },
+            timeout: 10000 // 10s timeout
+        });
+
+        const responseContent = groqResponse.data.choices[0].message.content;
+        
+        // Parse PG IDs from response
+        let pgIds = [];
+        const pgIdMatch = responseContent.match(/\[PG_IDs?:\s*([\d,\s]+)\]/i);
+        if (pgIdMatch) {
+            pgIds = pgIdMatch[1].split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id));
+        }
+
+        res.json({ 
+            role: 'assistant', 
+            content: responseContent,
+            pgIds: pgIds
+        });
     } catch (error) {
-        res.json({ role: 'assistant', content: "I'm having trouble connecting right now." });
+        console.error('Chat error:', error.message);
+        res.json({ role: 'assistant', content: "I'm having trouble connecting right now. Please try again." });
     }
 });
 
@@ -766,20 +862,181 @@ app.get('/api/user/:email/my-pg', async (req, res) => {
     }
 });
 
-// Confirm Payment & Add Customer (Temporary)
-app.post('/api/payment/confirm', async (req, res) => {
-    const { name, email, mobile, pgId, roomType, amount, bookingId } = req.body;
+// --- Visit Request APIs ---
+
+// Create Visit Request
+app.post('/api/visit-request', async (req, res) => {
+    const { userEmail, userName, pgId, ownerEmail, visitDate, visitTime } = req.body;
+    
+    if (!userEmail || !pgId || !visitDate || !visitTime) {
+        return res.status(400).json({ error: 'Missing required fields' });
+    }
+
     try {
-        console.log('Received payment confirmation request:', { name, email, mobile, pgId, roomType, amount, bookingId });
+        // Create visit_requests table if not exists
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS visit_requests (
+                id SERIAL PRIMARY KEY,
+                user_email VARCHAR(255) NOT NULL,
+                user_name VARCHAR(255),
+                pg_id INTEGER REFERENCES pg_listings(id),
+                owner_email VARCHAR(255),
+                visit_date DATE NOT NULL,
+                visit_time VARCHAR(50) NOT NULL,
+                status VARCHAR(50) DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
+        // Check for existing pending request for same PG
+        const existing = await pool.query(
+            'SELECT id FROM visit_requests WHERE user_email = $1 AND pg_id = $2 AND status = $3',
+            [userEmail, pgId, 'pending']
+        );
+
+        if (existing.rows.length > 0) {
+            // Update existing request
+            const result = await pool.query(
+                `UPDATE visit_requests SET visit_date = $1, visit_time = $2, updated_at = NOW() 
+                 WHERE user_email = $3 AND pg_id = $4 AND status = 'pending' RETURNING *`,
+                [visitDate, visitTime, userEmail, pgId]
+            );
+            return res.json(result.rows[0]);
+        }
+
+        // Insert new request
+        const result = await pool.query(
+            `INSERT INTO visit_requests (user_email, user_name, pg_id, owner_email, visit_date, visit_time)
+             VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+            [userEmail, userName || '', pgId, ownerEmail || '', visitDate, visitTime]
+        );
+        res.status(201).json(result.rows[0]);
+    } catch (error) {
+        console.error('Error creating visit request:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
+    }
+});
+
+// Get User's Visit Requests
+app.get('/api/visit-request/:email', async (req, res) => {
+    const { email } = req.params;
+    try {
+        const result = await pool.query(`
+            SELECT vr.*, p.title as pg_title, p.location as pg_location, p.city as pg_city, p.image_url as pg_image
+            FROM visit_requests vr
+            LEFT JOIN pg_listings p ON vr.pg_id = p.id
+            WHERE vr.user_email = $1
+            ORDER BY vr.created_at DESC
+        `, [email]);
+        res.json(result.rows);
+    } catch (error) {
+        console.error('Error fetching visit requests:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
+    }
+});
+
+// Approve Visit Request (Owner)
+app.put('/api/visit-request/:id/approve', async (req, res) => {
+    const { id } = req.params;
+    try {
+        const result = await pool.query(
+            `UPDATE visit_requests SET status = 'approved', updated_at = NOW() WHERE id = $1 RETURNING *`,
+            [id]
+        );
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Visit request not found' });
+        }
+        res.json(result.rows[0]);
+    } catch (error) {
+        console.error('Error approving visit request:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
+    }
+});
+
+// Reject Visit Request (Owner)
+app.put('/api/visit-request/:id/reject', async (req, res) => {
+    const { id } = req.params;
+    try {
+        const result = await pool.query(
+            `UPDATE visit_requests SET status = 'rejected', updated_at = NOW() WHERE id = $1 RETURNING *`,
+            [id]
+        );
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Visit request not found' });
+        }
+        res.json(result.rows[0]);
+    } catch (error) {
+        console.error('Error rejecting visit request:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
+    }
+});
+
+// Confirm Payment & Add Customer
+app.post('/api/payment/confirm', async (req, res) => {
+    const { name, email, mobile, pgId, roomType, amount, bookingId, moveInDate } = req.body;
+    try {
+        console.log('Received payment confirmation request:', { name, email, mobile, pgId, roomType, amount, bookingId, moveInDate });
+        
+        // Generate a unique booking ID if not provided
+        const finalBookingId = bookingId || `BK${Date.now()}${Math.floor(Math.random() * 1000)}`;
+        
+        // Insert customer record
         const result = await pool.query(
             `INSERT INTO customers (name, email, mobile, pg_id, room_type, amount, booking_id, status, paid_date, move_in_date)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 'Paid', NOW(), NOW()) RETURNING *`,
-            [name, email, mobile, pgId, roomType, amount, bookingId]
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 'Paid', NOW(), $8) RETURNING *`,
+            [name, email, mobile, pgId, roomType, amount, finalBookingId, moveInDate || null]
         );
+        
+        // Decrement available rooms for this PG (update rooms JSON)
+        // Get current rooms data
+        const pgResult = await pool.query('SELECT rooms FROM pg_listings WHERE id = $1', [pgId]);
+        if (pgResult.rows.length > 0 && pgResult.rows[0].rooms) {
+            let rooms = pgResult.rows[0].rooms;
+            if (typeof rooms === 'string') rooms = JSON.parse(rooms);
+            
+            // Decrement the count for the matching room type
+            if (Array.isArray(rooms)) {
+                rooms = rooms.map(room => {
+                    if (room.type === roomType && room.available > 0) {
+                        return { ...room, available: room.available - 1 };
+                    }
+                    return room;
+                });
+                await pool.query('UPDATE pg_listings SET rooms = $1 WHERE id = $2', [JSON.stringify(rooms), pgId]);
+            }
+        }
+        
         console.log('Customer added successfully:', result.rows[0]);
         res.status(201).json(result.rows[0]);
     } catch (error) {
         console.error('Error confirming payment:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
+    }
+});
+
+// Update Customer Check-in Date
+app.put('/api/customer/:id/check-in-date', async (req, res) => {
+    const { id } = req.params;
+    const { moveInDate } = req.body;
+    
+    if (!moveInDate) {
+        return res.status(400).json({ error: 'Move-in date is required' });
+    }
+    
+    try {
+        const result = await pool.query(
+            'UPDATE customers SET move_in_date = $1 WHERE id = $2 RETURNING *',
+            [moveInDate, id]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Customer not found' });
+        }
+        
+        res.json(result.rows[0]);
+    } catch (error) {
+        console.error('Error updating check-in date:', error);
         res.status(500).json({ error: 'Internal Server Error' });
     }
 });
