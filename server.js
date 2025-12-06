@@ -78,6 +78,16 @@ const runMigrations = async () => {
             END $$;
         `);
         
+        // Add gender column to pg_listings if not exists
+        await pool.query(`
+            DO $$ 
+            BEGIN 
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'pg_listings' AND column_name = 'gender') THEN 
+                    ALTER TABLE pg_listings ADD COLUMN gender VARCHAR(50) DEFAULT 'unisex'; 
+                END IF; 
+            END $$;
+        `);
+        
 
 
         // customers table (NEWLY ADDED)
