@@ -122,6 +122,22 @@ const runMigrations = async () => {
             );
         `);
 
+        // visit_requests table
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS visit_requests (
+                id SERIAL PRIMARY KEY,
+                user_email VARCHAR(255) NOT NULL,
+                user_name VARCHAR(255),
+                pg_id INTEGER REFERENCES pg_listings(id),
+                owner_email VARCHAR(255),
+                visit_date DATE NOT NULL,
+                visit_time VARCHAR(50) NOT NULL,
+                status VARCHAR(50) DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        `);
+
         // Fix announcements owner_id type for Clerk integration
         await pool.query(`
             DO $$ 
@@ -726,23 +742,27 @@ USER'S BOOKING:
                 bookingContext = 'USER HAS NO BOOKINGS.';
             }
 
-            // Get user's visit requests
-            const visitResult = await pool.query(`
-                SELECT vr.*, p.title as pg_title
-                FROM visit_requests vr
-                LEFT JOIN pg_listings p ON vr.pg_id = p.id
-                WHERE vr.user_email = $1
-                ORDER BY vr.created_at DESC
-                LIMIT 3
-            `, [userEmail]);
+            // Get user's visit requests (wrapped in try-catch in case table doesn't exist)
+            try {
+                const visitResult = await pool.query(`
+                    SELECT vr.*, p.title as pg_title
+                    FROM visit_requests vr
+                    LEFT JOIN pg_listings p ON vr.pg_id = p.id
+                    WHERE vr.user_email = $1
+                    ORDER BY vr.created_at DESC
+                    LIMIT 3
+                `, [userEmail]);
 
-            if (visitResult.rows.length > 0) {
-                visitContext = '\nUSER\'S SCHEDULED VISITS:';
-                visitResult.rows.forEach(v => {
-                    const statusLabel = v.status === 'pending' ? 'Waiting for approval' :
-                                        v.status === 'approved' ? 'Approved ✓' : 'Not approved ✗';
-                    visitContext += `\n- ${v.pg_title}: ${new Date(v.visit_date).toLocaleDateString()} at ${v.visit_time} - ${statusLabel}`;
-                });
+                if (visitResult.rows.length > 0) {
+                    visitContext = '\nUSER\'S SCHEDULED VISITS:';
+                    visitResult.rows.forEach(v => {
+                        const statusLabel = v.status === 'pending' ? 'Waiting for approval' :
+                                            v.status === 'approved' ? 'Approved ✓' : 'Not approved ✗';
+                        visitContext += `\n- ${v.pg_title}: ${new Date(v.visit_date).toLocaleDateString()} at ${v.visit_time} - ${statusLabel}`;
+                    });
+                }
+            } catch (visitError) {
+                console.log('Visit requests table may not exist yet:', visitError.message);
             }
         }
 
