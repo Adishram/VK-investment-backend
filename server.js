@@ -6,7 +6,6 @@ const cors = require('cors');
 const cron = require('node-cron');
 const axios = require('axios');
 const crypto = require('crypto');
-const nodemailer = require('nodemailer');
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -189,88 +188,32 @@ cron.schedule('*/4 * * * *', async () => {
     }
 });
 
-// --- Email Service Setup ---
-// Gmail transporter with optimized settings for cloud environments
-const transporter = nodemailer.createTransport({
-    host: 'smtp.gmail.com',
-    port: 587,
-    secure: false,
-    auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS
-    },
-    tls: {
-        rejectUnauthorized: false
-    },
-    connectionTimeout: 10000,
-    greetingTimeout: 10000,
-    socketTimeout: 15000
-});
-
-// Email sending - tries SendGrid first (fastest), then Gmail
+// --- Email Service (Resend only) ---
 const sendEmail = async (to, subject, text) => {
-    // Try SendGrid first (fastest and most reliable)
-    if (process.env.SENDGRID_API_KEY) {
-        try {
-            const response = await axios.post('https://api.sendgrid.com/v3/mail/send', {
-                personalizations: [{ to: [{ email: to }] }],
-                from: { email: process.env.EMAIL_USER || 'noreply@bookmypg.com', name: 'Book My PG' },
-                subject: subject,
-                content: [{ type: 'text/plain', value: text }]
-            }, {
-                headers: {
-                    'Authorization': `Bearer ${process.env.SENDGRID_API_KEY}`,
-                    'Content-Type': 'application/json'
-                },
-                timeout: 10000
-            });
-            console.log(`✅ Email sent via SendGrid to ${to}`);
-            return true;
-        } catch (error) {
-            console.error('SendGrid error:', error.response?.data?.errors?.[0]?.message || error.message);
-        }
+    if (!process.env.RESEND_API_KEY) {
+        console.log(`⚠️ [EMAIL SKIPPED] RESEND_API_KEY not configured. To: ${to}`);
+        return false;
     }
     
-    // Try Gmail/nodemailer
-    if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
-        try {
-            await transporter.sendMail({
-                from: `"Book My PG" <${process.env.EMAIL_USER}>`,
-                to,
-                subject,
-                text
-            });
-            console.log(`✅ Email sent via Gmail to ${to}`);
-            return true;
-        } catch (error) {
-            console.error('Gmail error:', error.message);
-        }
+    try {
+        const response = await axios.post('https://api.resend.com/emails', {
+            from: 'Book My PG <onboarding@resend.dev>',
+            to: [to],
+            subject: subject,
+            text: text
+        }, {
+            headers: {
+                'Authorization': `Bearer ${process.env.RESEND_API_KEY}`,
+                'Content-Type': 'application/json'
+            },
+            timeout: 10000
+        });
+        console.log(`✅ Email sent to ${to}:`, response.data.id);
+        return true;
+    } catch (error) {
+        console.error('Email error:', error.response?.data?.message || error.message);
+        return false;
     }
-    
-    // Fallback to Resend
-    if (process.env.RESEND_API_KEY) {
-        try {
-            const response = await axios.post('https://api.resend.com/emails', {
-                from: 'Book My PG <onboarding@resend.dev>',
-                to: [to],
-                subject: subject,
-                text: text
-            }, {
-                headers: {
-                    'Authorization': `Bearer ${process.env.RESEND_API_KEY}`,
-                    'Content-Type': 'application/json'
-                },
-                timeout: 10000
-            });
-            console.log(`✅ Email sent via Resend to ${to}:`, response.data.id);
-            return true;
-        } catch (error) {
-            console.error('Resend error:', error.response?.data?.message || error.message);
-        }
-    }
-    
-    console.log(`⚠️ [EMAIL SKIPPED] No email service configured. To: ${to}`);
-    return false;
 };
 
 // --- Helper Functions ---
