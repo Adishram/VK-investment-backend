@@ -47,10 +47,10 @@ const runMigrations = async () => {
                 id SERIAL PRIMARY KEY,
                 name VARCHAR(255) NOT NULL,
                 email VARCHAR(255) UNIQUE NOT NULL,
-                mobile VARCHAR(20) NOT NULL,
-                city VARCHAR(100) NOT NULL,
+                mobile VARCHAR(20),
+                city VARCHAR(100),
                 state VARCHAR(100),
-                address TEXT,
+                profile_picture TEXT,
                 password_hash VARCHAR(255) NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
@@ -60,18 +60,12 @@ const runMigrations = async () => {
         await pool.query(`
             DO $$ 
             BEGIN 
-                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'pg_owners' AND column_name = 'dob') THEN 
-                    ALTER TABLE pg_owners ADD COLUMN dob VARCHAR(20); 
-                END IF; 
                 IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'pg_owners' AND column_name = 'profile_picture') THEN 
                     ALTER TABLE pg_owners ADD COLUMN profile_picture TEXT; 
                 END IF;
                 IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'pg_owners' AND column_name = 'state') THEN 
                     ALTER TABLE pg_owners ADD COLUMN state VARCHAR(100); 
                 END IF;
-                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'pg_owners' AND column_name = 'address') THEN 
-                    ALTER TABLE pg_owners ADD COLUMN address TEXT; 
-                END IF; 
             END $$;
         `);
         
@@ -276,7 +270,7 @@ app.post('/api/super-admin/login', (req, res) => {
 
 // Add PG Owner (with Email)
 app.post('/api/super-admin/add-owner', async (req, res) => {
-    const { name, email, mobile, city, state, address } = req.body;
+    const { name, email, mobile, city, state } = req.body;
 
     if (!name || !email) {
         return res.status(400).json({ error: 'Name and Email are required' });
@@ -291,11 +285,11 @@ app.post('/api/super-admin/add-owner', async (req, res) => {
         const passwordHash = hashPassword(randomPassword);
 
         const query = `
-            INSERT INTO pg_owners (name, email, mobile, city, state, address, password_hash)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            INSERT INTO pg_owners (name, email, mobile, city, state, password_hash)
+            VALUES ($1, $2, $3, $4, $5, $6)
             RETURNING id, name, email, city, state
         `;
-        const values = [name, email, mobile, city, state || '', address || '', passwordHash];
+        const values = [name, email, mobile || '', city || '', state || '', passwordHash];
 
         const result = await pool.query(query, values);
         
