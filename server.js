@@ -391,15 +391,11 @@ app.get('/api/super-admin/availability', async (req, res) => {
     const { city, locality, search } = req.query;
 
     try {
+        // First get all PGs
         let query = `
             SELECT p.id, p.title, p.price, p.city, p.street as locality, p.food_included, p.occupancy_types,
-                   p.rooms, p.gender, p.owner_contact,
-                   COALESCE(o.name, 'Unknown') as owner_name, 
-                   COALESCE(o.email, p.owner_email) as owner_email,
-                   COALESCE(o.mobile, '') as owner_mobile,
-                   p.address
+                   p.rooms, p.gender, p.owner_contact, p.owner_email, p.address, p.owner_id
             FROM pg_listings p
-            LEFT JOIN pg_owners o ON p.owner_id = CAST(o.id AS VARCHAR)
             WHERE 1=1
         `;
         const values = [];
@@ -418,7 +414,7 @@ app.get('/api/super-admin/availability', async (req, res) => {
         }
 
         if (search) {
-            query += ` AND (p.title ILIKE $${paramCount} OR o.name ILIKE $${paramCount} OR p.address ILIKE $${paramCount})`;
+            query += ` AND (p.title ILIKE $${paramCount} OR p.address ILIKE $${paramCount})`;
             values.push(`%${search}%`);
             paramCount++;
         }
@@ -427,10 +423,19 @@ app.get('/api/super-admin/availability', async (req, res) => {
 
         const pgResult = await pool.query(query, values);
         
+        // Get all owners for lookup
+        const ownersResult = await pool.query('SELECT id, name, email, mobile FROM pg_owners');
+        const ownersMap = {};
+        ownersResult.rows.forEach(o => { ownersMap[o.id] = o; });
+        
         // Get customer counts for each PG
         const pgsWithCounts = await Promise.all(pgResult.rows.map(async (pg) => {
             const countResult = await pool.query('SELECT COUNT(*) FROM customers WHERE pg_id = $1', [pg.id]);
             const customerCount = parseInt(countResult.rows[0].count) || 0;
+            
+            // Get owner info
+            const ownerId = pg.owner_id ? parseInt(pg.owner_id) : null;
+            const owner = ownerId ? ownersMap[ownerId] : null;
             
             // Parse rooms JSON to get room breakdown
             let roomBreakdown = { single: 0, double: 0, triple: 0, total: 0 };
@@ -449,7 +454,14 @@ app.get('/api/super-admin/availability', async (req, res) => {
                 } catch (e) {}
             }
             
-            return { ...pg, customerCount, roomBreakdown };
+            return { 
+                ...pg, 
+                customerCount, 
+                roomBreakdown,
+                owner_name: owner?.name || 'Unknown',
+                owner_email: owner?.email || pg.owner_email || 'N/A',
+                owner_mobile: owner?.mobile || pg.owner_contact || 'N/A'
+            };
         }));
         
         res.json(pgsWithCounts);
@@ -502,19 +514,63 @@ app.get('/api/super-admin/bookings', async (req, res) => {
     }
 });
 
-// Notify Payment (Super Admin)
+// Notify Payment (Super Admin) - Also creates announcements
 app.post('/api/super-admin/notify-payment', async (req, res) => {
     try {
-        const dueCustomers = await pool.query("SELECT * FROM customers WHERE status = 'Due'");
+        // Get all customers grouped by PG
+        const customersResult = await pool.query(`
+            SELECT c.*, p.title as pg_title, p.id as pg_id, p.owner_id
+            FROM customers c
+            JOIN pg_listings p ON c.pg_id = p.id
+        `);
         
-        for (const customer of dueCustomers.rows) {
-            if (customer.email) {
-                const emailBody = `Dear ${customer.name},\n\nThis is a reminder to pay your PG rent for this month.\n\nAmount: ${customer.amount}\n\nRegards,\nBook My PG`;
-                await sendEmail(customer.email, 'Rent Payment Reminder', emailBody);
+        // Group customers by PG
+        const pgCustomers = {};
+        customersResult.rows.forEach(customer => {
+            if (!pgCustomers[customer.pg_id]) {
+                pgCustomers[customer.pg_id] = {
+                    pgId: customer.pg_id,
+                    pgTitle: customer.pg_title,
+                    ownerId: customer.owner_id,
+                    customers: []
+                };
+            }
+            pgCustomers[customer.pg_id].customers.push(customer);
+        });
+        
+        let announcementsCreated = 0;
+        let emailsSent = 0;
+        
+        // Create announcement for each PG
+        for (const pgId in pgCustomers) {
+            const pgData = pgCustomers[pgId];
+            const dueCustomers = pgData.customers.filter(c => c.status === 'Due');
+            
+            if (dueCustomers.length > 0) {
+                // Create announcement
+                const message = `📢 Payment Reminder: Dear residents, this is a friendly reminder to pay your monthly rent. ${dueCustomers.length} payment(s) pending. Please clear your dues at the earliest. Thank you!`;
+                await pool.query(
+                    'INSERT INTO announcements (pg_id, owner_id, message) VALUES ($1, $2, $3)',
+                    [pgData.pgId, pgData.ownerId || '1', message]
+                );
+                announcementsCreated++;
+                
+                // Send emails to due customers
+                for (const customer of dueCustomers) {
+                    if (customer.email) {
+                        const emailBody = `Dear ${customer.name},\n\nThis is a reminder to pay your PG rent for this month.\n\nPG: ${pgData.pgTitle}\nAmount Due: ₹${customer.amount}\n\nPlease clear your dues at the earliest.\n\nRegards,\nTeam Book My PG`;
+                        await sendEmail(customer.email, 'Rent Payment Reminder - Book My PG', emailBody);
+                        emailsSent++;
+                    }
+                }
             }
         }
         
-        res.json({ message: `Sent reminders to ${dueCustomers.rows.length} customers.` });
+        res.json({ 
+            message: `Created ${announcementsCreated} announcements and sent ${emailsSent} email reminders.`,
+            announcementsCreated,
+            emailsSent
+        });
     } catch (error) {
         console.error('Error sending notifications:', error);
         res.status(500).json({ error: 'Internal Server Error' });
