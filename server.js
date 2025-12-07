@@ -68,6 +68,9 @@ const runMigrations = async () => {
                 END IF;
                 IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'pg_owners' AND column_name = 'state') THEN 
                     ALTER TABLE pg_owners ADD COLUMN state VARCHAR(100); 
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'pg_owners' AND column_name = 'address') THEN 
+                    ALTER TABLE pg_owners ADD COLUMN address TEXT; 
                 END IF; 
             END $$;
         `);
