@@ -49,7 +49,8 @@ const runMigrations = async () => {
                 email VARCHAR(255) UNIQUE NOT NULL,
                 mobile VARCHAR(20) NOT NULL,
                 city VARCHAR(100) NOT NULL,
-                address TEXT NOT NULL,
+                state VARCHAR(100),
+                address TEXT,
                 password_hash VARCHAR(255) NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
@@ -64,6 +65,9 @@ const runMigrations = async () => {
                 END IF; 
                 IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'pg_owners' AND column_name = 'profile_picture') THEN 
                     ALTER TABLE pg_owners ADD COLUMN profile_picture TEXT; 
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'pg_owners' AND column_name = 'state') THEN 
+                    ALTER TABLE pg_owners ADD COLUMN state VARCHAR(100); 
                 END IF; 
             END $$;
         `);
@@ -76,6 +80,26 @@ const runMigrations = async () => {
                     ALTER TABLE pg_listings ADD COLUMN owner_email VARCHAR(255); 
                 END IF; 
             END $$;
+        `);
+        
+        // Add gender column to pg_listings if not exists
+        await pool.query(`
+            DO $$ 
+            BEGIN 
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'pg_listings' AND column_name = 'gender') THEN 
+                    ALTER TABLE pg_listings ADD COLUMN gender VARCHAR(50) DEFAULT 'unisex'; 
+                END IF; 
+            END $$;
+        `);
+        
+        // Populate gender based on PG title keywords
+        await pool.query(`
+            UPDATE pg_listings SET gender = 'women' 
+            WHERE LOWER(title) LIKE '%women%' OR LOWER(title) LIKE '%ladies%' OR LOWER(title) LIKE '%girl%' OR LOWER(title) LIKE '%female%';
+        `);
+        await pool.query(`
+            UPDATE pg_listings SET gender = 'men' 
+            WHERE LOWER(title) LIKE '%men%' OR LOWER(title) LIKE '%boys%' OR LOWER(title) LIKE '%male%' OR LOWER(title) LIKE '%gents%';
         `);
         
 
@@ -117,6 +141,22 @@ const runMigrations = async () => {
                 id SERIAL PRIMARY KEY,
                 email VARCHAR(255) UNIQUE NOT NULL,
                 phone VARCHAR(20),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        `);
+
+        // visit_requests table
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS visit_requests (
+                id SERIAL PRIMARY KEY,
+                user_email VARCHAR(255) NOT NULL,
+                user_name VARCHAR(255),
+                pg_id INTEGER REFERENCES pg_listings(id),
+                owner_email VARCHAR(255),
+                visit_date DATE NOT NULL,
+                visit_time VARCHAR(50) NOT NULL,
+                status VARCHAR(50) DEFAULT 'pending',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
@@ -188,7 +228,34 @@ const hashPassword = (password) => {
 // --- API Routes ---
 
 app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', message: 'Server is running' });
+    res.json({ 
+        status: 'ok', 
+        message: 'Server is running',
+        groq_key_set: !!process.env.GROQ_API_KEY,
+        groq_key_length: process.env.GROQ_API_KEY ? process.env.GROQ_API_KEY.length : 0
+    });
+});
+
+// Direct Groq API test endpoint
+app.get('/api/test-groq', async (req, res) => {
+    try {
+        const groqResponse = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
+            model: "llama-3.1-8b-instant",
+            messages: [{ role: 'user', content: 'Say hello in one word' }],
+            max_tokens: 10
+        }, { 
+            headers: { 'Authorization': `Bearer ${process.env.GROQ_API_KEY}` },
+            timeout: 10000
+        });
+        res.json({ success: true, response: groqResponse.data.choices[0].message.content });
+    } catch (error) {
+        res.json({ 
+            success: false, 
+            error: error.message,
+            response_status: error.response?.status,
+            response_data: error.response?.data
+        });
+    }
 });
 
 // Super Admin Login
@@ -206,7 +273,7 @@ app.post('/api/super-admin/login', (req, res) => {
 
 // Add PG Owner (with Email)
 app.post('/api/super-admin/add-owner', async (req, res) => {
-    const { name, email, mobile, city, address } = req.body;
+    const { name, email, mobile, city, state, address } = req.body;
 
     if (!name || !email) {
         return res.status(400).json({ error: 'Name and Email are required' });
@@ -221,11 +288,11 @@ app.post('/api/super-admin/add-owner', async (req, res) => {
         const passwordHash = hashPassword(randomPassword);
 
         const query = `
-            INSERT INTO pg_owners (name, email, mobile, city, address, password_hash)
-            VALUES ($1, $2, $3, $4, $5, $6)
-            RETURNING id, name, email
+            INSERT INTO pg_owners (name, email, mobile, city, state, address, password_hash)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            RETURNING id, name, email, city, state
         `;
-        const values = [name, email, mobile, city, address, passwordHash];
+        const values = [name, email, mobile, city, state || '', address || '', passwordHash];
 
         const result = await pool.query(query, values);
         
@@ -252,13 +319,12 @@ app.post('/api/super-admin/add-owner', async (req, res) => {
 app.get('/api/super-admin/owners', async (req, res) => {
     const { search } = req.query;
     try {
-        let query = 'SELECT id, name, email, mobile, city FROM pg_owners';
+        let query = 'SELECT id, name, email, mobile, city, state, created_at FROM pg_owners';
         let values = [];
         
         if (search) {
-            query += ' WHERE name ILIKE $1 OR email ILIKE $1 OR city ILIKE $1';
+            query += ' WHERE name ILIKE $1 OR email ILIKE $1 OR city ILIKE $1 OR mobile ILIKE $1';
             values.push(`%${search}%`);
-            paramCount++;
         }
         
         query += ' ORDER BY created_at DESC';
@@ -327,7 +393,11 @@ app.get('/api/super-admin/availability', async (req, res) => {
     try {
         let query = `
             SELECT p.id, p.title, p.price, p.city, p.street as locality, p.food_included, p.occupancy_types,
-                   COALESCE(o.name, 'Unknown') as owner_name, p.owner_email, p.address
+                   p.rooms, p.gender, p.owner_contact,
+                   COALESCE(o.name, 'Unknown') as owner_name, 
+                   COALESCE(o.email, p.owner_email) as owner_email,
+                   COALESCE(o.mobile, '') as owner_mobile,
+                   p.address
             FROM pg_listings p
             LEFT JOIN pg_owners o ON p.owner_id = CAST(o.id AS VARCHAR)
             WHERE 1=1
@@ -355,8 +425,34 @@ app.get('/api/super-admin/availability', async (req, res) => {
 
         query += ' ORDER BY p.created_at DESC';
 
-        const result = await pool.query(query, values);
-        res.json(result.rows);
+        const pgResult = await pool.query(query, values);
+        
+        // Get customer counts for each PG
+        const pgsWithCounts = await Promise.all(pgResult.rows.map(async (pg) => {
+            const countResult = await pool.query('SELECT COUNT(*) FROM customers WHERE pg_id = $1', [pg.id]);
+            const customerCount = parseInt(countResult.rows[0].count) || 0;
+            
+            // Parse rooms JSON to get room breakdown
+            let roomBreakdown = { single: 0, double: 0, triple: 0, total: 0 };
+            if (pg.rooms) {
+                try {
+                    const rooms = typeof pg.rooms === 'string' ? JSON.parse(pg.rooms) : pg.rooms;
+                    if (Array.isArray(rooms)) {
+                        rooms.forEach(room => {
+                            const count = room.count || room.available || 0;
+                            if (room.type?.toLowerCase().includes('single')) roomBreakdown.single += count;
+                            else if (room.type?.toLowerCase().includes('double')) roomBreakdown.double += count;
+                            else if (room.type?.toLowerCase().includes('triple')) roomBreakdown.triple += count;
+                            roomBreakdown.total += count;
+                        });
+                    }
+                } catch (e) {}
+            }
+            
+            return { ...pg, customerCount, roomBreakdown };
+        }));
+        
+        res.json(pgsWithCounts);
     } catch (error) {
         console.error('Error fetching availability:', error);
         res.status(500).json({ error: 'Internal Server Error' });
@@ -365,12 +461,13 @@ app.get('/api/super-admin/availability', async (req, res) => {
 
 // Get Booking Report (Super Admin)
 app.get('/api/super-admin/bookings', async (req, res) => {
-    const { pgName, roomType } = req.query;
+    const { pgName, roomType, search } = req.query;
     try {
         let query = `
             SELECT c.id, p.title as "pgName", c.room_no as "roomNo", c.name as "customerName", 
                    c.move_in_date as "moveIn", c.booking_id as "bookingId", c.amount, 
-                   c.paid_date as "paidDate", c.status
+                   c.paid_date as "paidDate", c.status, c.room_type as "roomType",
+                   c.email as "customerEmail", c.mobile as "customerMobile", c.floor
             FROM customers c
             JOIN pg_listings p ON c.pg_id = p.id
             WHERE 1=1
@@ -387,6 +484,12 @@ app.get('/api/super-admin/bookings', async (req, res) => {
         if (roomType) {
             query += ` AND c.room_type ILIKE $${paramCount}`;
             values.push(`%${roomType}%`);
+            paramCount++;
+        }
+
+        if (search) {
+            query += ` AND (c.name ILIKE $${paramCount} OR c.booking_id ILIKE $${paramCount} OR c.email ILIKE $${paramCount})`;
+            values.push(`%${search}%`);
             paramCount++;
         }
 
@@ -726,23 +829,27 @@ USER'S BOOKING:
                 bookingContext = 'USER HAS NO BOOKINGS.';
             }
 
-            // Get user's visit requests
-            const visitResult = await pool.query(`
-                SELECT vr.*, p.title as pg_title
-                FROM visit_requests vr
-                LEFT JOIN pg_listings p ON vr.pg_id = p.id
-                WHERE vr.user_email = $1
-                ORDER BY vr.created_at DESC
-                LIMIT 3
-            `, [userEmail]);
+            // Get user's visit requests (wrapped in try-catch in case table doesn't exist)
+            try {
+                const visitResult = await pool.query(`
+                    SELECT vr.*, p.title as pg_title
+                    FROM visit_requests vr
+                    LEFT JOIN pg_listings p ON vr.pg_id = p.id
+                    WHERE vr.user_email = $1
+                    ORDER BY vr.created_at DESC
+                    LIMIT 3
+                `, [userEmail]);
 
-            if (visitResult.rows.length > 0) {
-                visitContext = '\nUSER\'S SCHEDULED VISITS:';
-                visitResult.rows.forEach(v => {
-                    const statusLabel = v.status === 'pending' ? 'Waiting for approval' :
-                                        v.status === 'approved' ? 'Approved ✓' : 'Not approved ✗';
-                    visitContext += `\n- ${v.pg_title}: ${new Date(v.visit_date).toLocaleDateString()} at ${v.visit_time} - ${statusLabel}`;
-                });
+                if (visitResult.rows.length > 0) {
+                    visitContext = '\nUSER\'S SCHEDULED VISITS:';
+                    visitResult.rows.forEach(v => {
+                        const statusLabel = v.status === 'pending' ? 'Waiting for approval' :
+                                            v.status === 'approved' ? 'Approved ✓' : 'Not approved ✗';
+                        visitContext += `\n- ${v.pg_title}: ${new Date(v.visit_date).toLocaleDateString()} at ${v.visit_time} - ${statusLabel}`;
+                    });
+                }
+            } catch (visitError) {
+                console.log('Visit requests table may not exist yet:', visitError.message);
             }
         }
 
@@ -793,6 +900,9 @@ ${city ? `User's current city filter: ${city}` : ''}`;
         });
     } catch (error) {
         console.error('Chat error:', error.message);
+        if (error.response) {
+            console.error('Groq API Response Error:', error.response.status, error.response.data);
+        }
         res.json({ role: 'assistant', content: "I'm having trouble connecting right now. Please try again." });
     }
 });
@@ -1037,6 +1147,48 @@ app.put('/api/customer/:id/check-in-date', async (req, res) => {
         res.json(result.rows[0]);
     } catch (error) {
         console.error('Error updating check-in date:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
+    }
+});
+
+// Cancel Booking / Unsubscribe from PG
+app.delete('/api/customer/:id/cancel', async (req, res) => {
+    const { id } = req.params;
+    
+    try {
+        // Get customer details first to restore room count
+        const customerResult = await pool.query('SELECT * FROM customers WHERE id = $1', [id]);
+        if (customerResult.rows.length === 0) {
+            return res.status(404).json({ error: 'Booking not found' });
+        }
+        
+        const customer = customerResult.rows[0];
+        
+        // Restore room availability
+        if (customer.pg_id && customer.room_type) {
+            const pgResult = await pool.query('SELECT rooms FROM pg_listings WHERE id = $1', [customer.pg_id]);
+            if (pgResult.rows.length > 0 && pgResult.rows[0].rooms) {
+                let rooms = pgResult.rows[0].rooms;
+                if (typeof rooms === 'string') rooms = JSON.parse(rooms);
+                
+                if (Array.isArray(rooms)) {
+                    rooms = rooms.map(room => {
+                        if (room.type === customer.room_type) {
+                            return { ...room, available: (room.available || 0) + 1 };
+                        }
+                        return room;
+                    });
+                    await pool.query('UPDATE pg_listings SET rooms = $1 WHERE id = $2', [JSON.stringify(rooms), customer.pg_id]);
+                }
+            }
+        }
+        
+        // Delete customer record
+        await pool.query('DELETE FROM customers WHERE id = $1', [id]);
+        
+        res.json({ success: true, message: 'Booking cancelled successfully' });
+    } catch (error) {
+        console.error('Error cancelling booking:', error);
         res.status(500).json({ error: 'Internal Server Error' });
     }
 });
