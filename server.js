@@ -198,48 +198,50 @@ const transporter = nodemailer.createTransport({
     }
 });
 
-// Fast email using Resend API (much faster than nodemailer)
+// Email sending - primarily uses Gmail/nodemailer (works with any recipient)
+// Resend free tier only works with verified domains, so Gmail is more reliable for free
 const sendEmail = async (to, subject, text) => {
-    const resendApiKey = process.env.RESEND_API_KEY;
-    
-    // Fallback to nodemailer if Resend not configured
-    if (!resendApiKey) {
-        if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
-            console.log('Email credentials not found. Skipping email.');
-            console.log(`[MOCK EMAIL] To: ${to}, Subject: ${subject}`);
-            return;
-        }
+    // Try Gmail/nodemailer first (works with any recipient)
+    if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
         try {
             await transporter.sendMail({
-                from: process.env.EMAIL_USER,
+                from: `"Book My PG" <${process.env.EMAIL_USER}>`,
                 to,
                 subject,
                 text
             });
-            console.log(`Email sent via nodemailer to ${to}`);
+            console.log(`✅ Email sent via Gmail to ${to}`);
+            return true;
         } catch (error) {
-            console.error('Error sending email via nodemailer:', error);
+            console.error('Error sending email via Gmail:', error.message);
         }
-        return;
     }
     
-    // Use Resend API (faster and more reliable)
-    try {
-        const response = await axios.post('https://api.resend.com/emails', {
-            from: 'Book My PG <onboarding@resend.dev>',
-            to: [to],
-            subject: subject,
-            text: text
-        }, {
-            headers: {
-                'Authorization': `Bearer ${resendApiKey}`,
-                'Content-Type': 'application/json'
-            }
-        });
-        console.log(`Email sent via Resend to ${to}:`, response.data.id);
-    } catch (error) {
-        console.error('Error sending email via Resend:', error.response?.data || error.message);
+    // Fallback to Resend if Gmail fails or not configured
+    const resendApiKey = process.env.RESEND_API_KEY;
+    if (resendApiKey) {
+        try {
+            const response = await axios.post('https://api.resend.com/emails', {
+                from: 'Book My PG <onboarding@resend.dev>',
+                to: [to],
+                subject: subject,
+                text: text
+            }, {
+                headers: {
+                    'Authorization': `Bearer ${resendApiKey}`,
+                    'Content-Type': 'application/json'
+                }
+            });
+            console.log(`✅ Email sent via Resend to ${to}:`, response.data.id);
+            return true;
+        } catch (error) {
+            console.error('Resend error:', error.response?.data?.message || error.message);
+        }
     }
+    
+    // No email service available
+    console.log(`⚠️ [EMAIL SKIPPED] No email service configured. To: ${to}, Subject: ${subject}`);
+    return false;
 };
 
 // --- Helper Functions ---
