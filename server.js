@@ -190,18 +190,48 @@ cron.schedule('*/4 * * * *', async () => {
 });
 
 // --- Email Service Setup ---
+// Gmail transporter with optimized settings for cloud environments
 const transporter = nodemailer.createTransport({
-    service: 'gmail',
+    host: 'smtp.gmail.com',
+    port: 587,
+    secure: false,
     auth: {
         user: process.env.EMAIL_USER,
         pass: process.env.EMAIL_PASS
-    }
+    },
+    tls: {
+        rejectUnauthorized: false
+    },
+    connectionTimeout: 10000,
+    greetingTimeout: 10000,
+    socketTimeout: 15000
 });
 
-// Email sending - primarily uses Gmail/nodemailer (works with any recipient)
-// Resend free tier only works with verified domains, so Gmail is more reliable for free
+// Email sending - tries SendGrid first (fastest), then Gmail
 const sendEmail = async (to, subject, text) => {
-    // Try Gmail/nodemailer first (works with any recipient)
+    // Try SendGrid first (fastest and most reliable)
+    if (process.env.SENDGRID_API_KEY) {
+        try {
+            const response = await axios.post('https://api.sendgrid.com/v3/mail/send', {
+                personalizations: [{ to: [{ email: to }] }],
+                from: { email: process.env.EMAIL_USER || 'noreply@bookmypg.com', name: 'Book My PG' },
+                subject: subject,
+                content: [{ type: 'text/plain', value: text }]
+            }, {
+                headers: {
+                    'Authorization': `Bearer ${process.env.SENDGRID_API_KEY}`,
+                    'Content-Type': 'application/json'
+                },
+                timeout: 10000
+            });
+            console.log(`✅ Email sent via SendGrid to ${to}`);
+            return true;
+        } catch (error) {
+            console.error('SendGrid error:', error.response?.data?.errors?.[0]?.message || error.message);
+        }
+    }
+    
+    // Try Gmail/nodemailer
     if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
         try {
             await transporter.sendMail({
@@ -213,13 +243,12 @@ const sendEmail = async (to, subject, text) => {
             console.log(`✅ Email sent via Gmail to ${to}`);
             return true;
         } catch (error) {
-            console.error('Error sending email via Gmail:', error.message);
+            console.error('Gmail error:', error.message);
         }
     }
     
-    // Fallback to Resend if Gmail fails or not configured
-    const resendApiKey = process.env.RESEND_API_KEY;
-    if (resendApiKey) {
+    // Fallback to Resend
+    if (process.env.RESEND_API_KEY) {
         try {
             const response = await axios.post('https://api.resend.com/emails', {
                 from: 'Book My PG <onboarding@resend.dev>',
@@ -228,9 +257,10 @@ const sendEmail = async (to, subject, text) => {
                 text: text
             }, {
                 headers: {
-                    'Authorization': `Bearer ${resendApiKey}`,
+                    'Authorization': `Bearer ${process.env.RESEND_API_KEY}`,
                     'Content-Type': 'application/json'
-                }
+                },
+                timeout: 10000
             });
             console.log(`✅ Email sent via Resend to ${to}:`, response.data.id);
             return true;
@@ -239,8 +269,7 @@ const sendEmail = async (to, subject, text) => {
         }
     }
     
-    // No email service available
-    console.log(`⚠️ [EMAIL SKIPPED] No email service configured. To: ${to}, Subject: ${subject}`);
+    console.log(`⚠️ [EMAIL SKIPPED] No email service configured. To: ${to}`);
     return false;
 };
 
