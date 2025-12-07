@@ -198,22 +198,47 @@ const transporter = nodemailer.createTransport({
     }
 });
 
+// Fast email using Resend API (much faster than nodemailer)
 const sendEmail = async (to, subject, text) => {
-    if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
-        console.log('Email credentials not found. Skipping email.');
-        console.log(`[MOCK EMAIL] To: ${to}, Subject: ${subject}, Body: ${text}`);
+    const resendApiKey = process.env.RESEND_API_KEY;
+    
+    // Fallback to nodemailer if Resend not configured
+    if (!resendApiKey) {
+        if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
+            console.log('Email credentials not found. Skipping email.');
+            console.log(`[MOCK EMAIL] To: ${to}, Subject: ${subject}`);
+            return;
+        }
+        try {
+            await transporter.sendMail({
+                from: process.env.EMAIL_USER,
+                to,
+                subject,
+                text
+            });
+            console.log(`Email sent via nodemailer to ${to}`);
+        } catch (error) {
+            console.error('Error sending email via nodemailer:', error);
+        }
         return;
     }
+    
+    // Use Resend API (faster and more reliable)
     try {
-        await transporter.sendMail({
-            from: process.env.EMAIL_USER,
-            to,
-            subject,
-            text
+        const response = await axios.post('https://api.resend.com/emails', {
+            from: 'Book My PG <onboarding@resend.dev>',
+            to: [to],
+            subject: subject,
+            text: text
+        }, {
+            headers: {
+                'Authorization': `Bearer ${resendApiKey}`,
+                'Content-Type': 'application/json'
+            }
         });
-        console.log(`Email sent to ${to}`);
+        console.log(`Email sent via Resend to ${to}:`, response.data.id);
     } catch (error) {
-        console.error('Error sending email:', error);
+        console.error('Error sending email via Resend:', error.response?.data || error.message);
     }
 };
 
