@@ -394,7 +394,7 @@ app.get('/api/super-admin/availability', async (req, res) => {
         // First get all PGs
         let query = `
             SELECT p.id, p.title, p.price, p.city, p.street as locality, p.food_included, p.occupancy_types,
-                   p.rooms, p.gender, p.owner_contact, p.owner_email, p.address, p.owner_id
+                   p.rooms, p.gender, p.owner_contact, p.owner_email, p.owner_id
             FROM pg_listings p
             WHERE 1=1
         `;
@@ -414,7 +414,7 @@ app.get('/api/super-admin/availability', async (req, res) => {
         }
 
         if (search) {
-            query += ` AND (p.title ILIKE $${paramCount} OR p.address ILIKE $${paramCount})`;
+            query += ` AND (p.title ILIKE $${paramCount} OR p.city ILIKE $${paramCount})`;
             values.push(`%${search}%`);
             paramCount++;
         }
