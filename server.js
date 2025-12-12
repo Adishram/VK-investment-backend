@@ -581,7 +581,7 @@ app.post('/api/owner/login', async (req, res) => {
     if (!email || !password) return res.status(400).json({ error: 'Required fields missing' });
 
     try {
-        const result = await pool.query('SELECT * FROM pg_owners WHERE email = $1', [email]);
+        const result = await pool.query('SELECT * FROM pg_owners WHERE LOWER(email) = LOWER($1)', [email]);
         if (result.rows.length === 0) return res.status(401).json({ error: 'Invalid credentials' });
 
         const owner = result.rows[0];
