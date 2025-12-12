@@ -711,6 +711,188 @@ app.put('/api/owner/guest/:id', async (req, res) => {
     }
 });
 
+// Get Owner Stats
+app.get('/api/owner/:id/stats', async (req, res) => {
+    const { id } = req.params;
+    try {
+        // Get PGs for this owner
+        const pgsResult = await pool.query('SELECT id FROM pg_listings WHERE owner_id = $1', [id]);
+        const pgIds = pgsResult.rows.map(pg => pg.id);
+        
+        let totalCustomers = 0;
+        let totalEarnings = 0;
+        let paidPayments = 0;
+        let pendingPayments = 0;
+        
+        if (pgIds.length > 0) {
+            // Get customers in these PGs
+            const customersResult = await pool.query(
+                'SELECT status, amount FROM customers WHERE pg_id = ANY($1::int[])',
+                [pgIds]
+            );
+            
+            totalCustomers = customersResult.rows.length;
+            customersResult.rows.forEach(c => {
+                const amount = parseFloat(c.amount) || 0;
+                if (c.status === 'Paid') {
+                    totalEarnings += amount;
+                    paidPayments++;
+                } else {
+                    pendingPayments++;
+                }
+            });
+        }
+        
+        res.json({
+            totalPGs: pgsResult.rows.length,
+            totalCustomers,
+            totalEarnings,
+            paidPayments,
+            pendingPayments
+        });
+    } catch (error) {
+        console.error('Error fetching owner stats:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
+    }
+});
+
+// Get Owner Payments
+app.get('/api/owner/:id/payments', async (req, res) => {
+    const { id } = req.params;
+    try {
+        // Get PGs for this owner
+        const pgsResult = await pool.query('SELECT id FROM pg_listings WHERE owner_id = $1', [id]);
+        const pgIds = pgsResult.rows.map(pg => pg.id);
+        
+        if (pgIds.length === 0) {
+            return res.json({ customers: [], totalEarnings: 0, paidCount: 0, dueCount: 0 });
+        }
+        
+        // Get customers with payment details
+        const customersResult = await pool.query(`
+            SELECT c.*, p.title as pg_title
+            FROM customers c
+            JOIN pg_listings p ON c.pg_id = p.id
+            WHERE c.pg_id = ANY($1::int[])
+            ORDER BY c.created_at DESC
+        `, [pgIds]);
+        
+        let totalEarnings = 0;
+        let paidCount = 0;
+        let dueCount = 0;
+        
+        customersResult.rows.forEach(c => {
+            const amount = parseFloat(c.amount) || 0;
+            if (c.status === 'Paid') {
+                totalEarnings += amount;
+                paidCount++;
+            } else {
+                dueCount++;
+            }
+        });
+        
+        res.json({
+            customers: customersResult.rows,
+            totalEarnings,
+            paidCount,
+            dueCount
+        });
+    } catch (error) {
+        console.error('Error fetching owner payments:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
+    }
+});
+
+// Get Owner Visits
+app.get('/api/owner/:id/visits', async (req, res) => {
+    const { id } = req.params;
+    try {
+        // Get PGs for this owner
+        const pgsResult = await pool.query('SELECT id FROM pg_listings WHERE owner_id = $1', [id]);
+        const pgIds = pgsResult.rows.map(pg => pg.id);
+        
+        if (pgIds.length === 0) {
+            return res.json([]);
+        }
+        
+        // Get visit requests for these PGs
+        const visitsResult = await pool.query(`
+            SELECT vr.*, p.title as pg_title, p.location as pg_location
+            FROM visit_requests vr
+            JOIN pg_listings p ON vr.pg_id = p.id
+            WHERE vr.pg_id = ANY($1::int[])
+            ORDER BY 
+                CASE WHEN vr.status = 'pending' THEN 0
+                     WHEN vr.status = 'approved' THEN 1
+                     ELSE 2 END,
+                vr.created_at DESC
+        `, [pgIds]);
+        
+        res.json(visitsResult.rows);
+    } catch (error) {
+        console.error('Error fetching owner visits:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
+    }
+});
+
+// Update PG
+app.put('/api/pg/:id', async (req, res) => {
+    const { id } = req.params;
+    const { amenities, rules, rooms, images, price, safety_deposit } = req.body;
+    
+    try {
+        const updates = [];
+        const values = [];
+        let paramCount = 1;
+        
+        if (amenities !== undefined) {
+            updates.push(`amenities = $${paramCount}`);
+            values.push(JSON.stringify(amenities));
+            paramCount++;
+        }
+        if (rules !== undefined) {
+            updates.push(`rules = $${paramCount}`);
+            values.push(JSON.stringify(rules));
+            paramCount++;
+        }
+        if (rooms !== undefined) {
+            updates.push(`rooms = $${paramCount}`);
+            values.push(JSON.stringify(rooms));
+            paramCount++;
+        }
+        if (images !== undefined) {
+            updates.push(`images = $${paramCount}`);
+            values.push(JSON.stringify(images));
+            paramCount++;
+        }
+        if (price !== undefined) {
+            updates.push(`price = $${paramCount}`);
+            values.push(price);
+            paramCount++;
+        }
+        if (safety_deposit !== undefined) {
+            updates.push(`safety_deposit = $${paramCount}`);
+            values.push(safety_deposit);
+            paramCount++;
+        }
+        
+        if (updates.length === 0) {
+            return res.status(400).json({ error: 'No fields to update' });
+        }
+        
+        values.push(id);
+        const query = `UPDATE pg_listings SET ${updates.join(', ')} WHERE id = $${paramCount} RETURNING *`;
+        
+        const result = await pool.query(query, values);
+        if (result.rowCount === 0) return res.status(404).json({ error: 'PG not found' });
+        
+        res.json(result.rows[0]);
+    } catch (error) {
+        console.error('Error updating PG:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
+    }
+});
+
 
 // --- Common Routes ---
 
@@ -758,7 +940,7 @@ app.post('/api/pg', async (req, res) => {
         title, description, price, location, latitude, longitude, image_url, owner_contact,
         house_no, street, city, pincode,
         occupancy_types, occupancy_prices, food_included, notice_period, gate_close_time, safety_deposit,
-        amenities, rules, rooms, images, owner_id, owner_email
+        amenities, rules, rooms, images, owner_id, owner_email, gender
     } = req.body;
 
     try {
@@ -767,9 +949,9 @@ app.post('/api/pg', async (req, res) => {
         title, description, price, location, latitude, longitude, image_url, owner_contact,
         house_no, street, city, pincode,
         occupancy_types, occupancy_prices, food_included, notice_period, gate_close_time, safety_deposit,
-        amenities, rules, rooms, images, owner_id, owner_email
+        amenities, rules, rooms, images, owner_id, owner_email, gender
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
       RETURNING *;
     `;
         const values = [
@@ -786,7 +968,8 @@ app.post('/api/pg', async (req, res) => {
             JSON.stringify(rooms || []),
             JSON.stringify(images || []),
             owner_id || null,
-            owner_email || null
+            owner_email || null,
+            gender || 'unisex'
         ];
 
         const result = await pool.query(query, values);
