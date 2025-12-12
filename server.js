@@ -281,14 +281,14 @@ app.post('/api/super-admin/add-owner', async (req, res) => {
         for (let i = 0; i < 12; i++) {
             randomPassword += chars.charAt(Math.floor(Math.random() * chars.length));
         }
-        const passwordHash = hashPassword(randomPassword);
+        // Store plaintext password (not hashed)
 
         const query = `
             INSERT INTO pg_owners (name, email, mobile, city, state, password_hash)
             VALUES ($1, $2, $3, $4, $5, $6)
             RETURNING id, name, email, city, state
         `;
-        const values = [name, email, mobile || '', city || '', state || '', passwordHash];
+        const values = [name, email, mobile || '', city || '', state || '', randomPassword];
 
         const result = await pool.query(query, values);
         
@@ -585,9 +585,8 @@ app.post('/api/owner/login', async (req, res) => {
         if (result.rows.length === 0) return res.status(401).json({ error: 'Invalid credentials' });
 
         const owner = result.rows[0];
-        const inputHash = hashPassword(password);
-
-        if (inputHash === owner.password_hash) {
+        // Compare plaintext password directly
+        if (password === owner.password_hash) {
             res.json({ success: true, owner: { id: owner.id, name: owner.name, email: owner.email } });
         } else {
             res.status(401).json({ error: 'Invalid credentials' });
@@ -659,9 +658,11 @@ app.post('/api/owner/change-password', async (req, res) => {
         if (result.rows.length === 0) return res.status(404).json({ error: 'Owner not found' });
         
         const owner = result.rows[0];
-        if (hashPassword(currentPassword) !== owner.password_hash) return res.status(401).json({ error: 'Incorrect password' });
+        // Compare plaintext password directly
+        if (currentPassword !== owner.password_hash) return res.status(401).json({ error: 'Incorrect password' });
         
-        await pool.query('UPDATE pg_owners SET password_hash = $1 WHERE email = $2', [hashPassword(newPassword), email]);
+        // Store new password as plaintext
+        await pool.query('UPDATE pg_owners SET password_hash = $1 WHERE email = $2', [newPassword, email]);
         res.json({ message: 'Password updated' });
     } catch (error) {
         res.status(500).json({ error: 'Server error' });
