@@ -293,7 +293,18 @@ app.post('/api/super-admin/add-owner', async (req, res) => {
         const result = await pool.query(query, values);
         
         // Send Email
-        const emailBody = `Hello ${name},\n\nYour account has been created on Book My PG.\n\nLogin Credentials:\nEmail: ${email}\nPassword: ${randomPassword}\n\nPlease login and change your password immediately.\n\nRegards,\nTeam Book My PG`;
+        const emailBody = `Hello ${name},
+
+Your account has been created on Book My PG.
+
+Login Credentials:
+Email: ${email}
+Password: ${randomPassword}
+
+Please login and change your password immediately.
+
+Regards,
+Team Book My PG`;
         await sendEmail(email, 'Welcome to Book My PG - Your Credentials', emailBody);
 
         res.status(201).json({
@@ -357,8 +368,9 @@ app.get('/api/super-admin/owner/:id/details', async (req, res) => {
     try {
         const ownerResult = await pool.query('SELECT * FROM pg_owners WHERE id = $1', [id]);
         if (ownerResult.rows.length === 0) return res.status(404).json({ error: 'Owner not found' });
-
-        const pgsResult = await pool.query('SELECT * FROM pg_listings WHERE owner_id = $1', [id]);
+        
+        const ownerEmail = ownerResult.rows[0].email;
+        const pgsResult = await pool.query('SELECT * FROM pg_listings WHERE LOWER(owner_email) = LOWER($1)', [ownerEmail]);
         
         // Get total customers for this owner's PGs
         const pgIds = pgsResult.rows.map(pg => pg.id);
@@ -554,7 +566,17 @@ app.post('/api/super-admin/notify-payment', async (req, res) => {
                 // Send emails to due customers
                 for (const customer of dueCustomers) {
                     if (customer.email) {
-                        const emailBody = `Dear ${customer.name},\n\nThis is a reminder to pay your PG rent for this month.\n\nPG: ${pgData.pgTitle}\nAmount Due: ₹${customer.amount}\n\nPlease clear your dues at the earliest.\n\nRegards,\nTeam Book My PG`;
+                        const emailBody = `Dear ${customer.name},
+
+This is a reminder to pay your PG rent for this month.
+
+PG: ${pgData.pgTitle}
+Amount Due: ₹${customer.amount}
+
+Please clear your dues at the earliest.
+
+Regards,
+Team Book My PG`;
                         await sendEmail(customer.email, 'Rent Payment Reminder - Book My PG', emailBody);
                         emailsSent++;
                     }
@@ -673,8 +695,13 @@ app.post('/api/owner/change-password', async (req, res) => {
 app.get('/api/owner/:id/guests', async (req, res) => {
     const { id } = req.params; // Owner ID
     try {
-        // Get all PGs for this owner
-        const pgs = await pool.query('SELECT id, title FROM pg_listings WHERE owner_id = $1', [id]);
+        // Get owner email first
+        const ownerResult = await pool.query('SELECT email FROM pg_owners WHERE id = $1', [id]);
+        if (ownerResult.rows.length === 0) return res.json([]);
+        const ownerEmail = ownerResult.rows[0].email;
+        
+        // Get all PGs for this owner by email
+        const pgs = await pool.query('SELECT id, title FROM pg_listings WHERE LOWER(owner_email) = LOWER($1)', [ownerEmail]);
         const pgIds = pgs.rows.map(pg => pg.id);
         
         if (pgIds.length === 0) return res.json([]);
@@ -716,8 +743,15 @@ app.put('/api/owner/guest/:id', async (req, res) => {
 app.get('/api/owner/:id/stats', async (req, res) => {
     const { id } = req.params;
     try {
-        // Get PGs for this owner
-        const pgsResult = await pool.query('SELECT id FROM pg_listings WHERE owner_id = $1', [id]);
+        // Get owner email first
+        const ownerResult = await pool.query('SELECT email FROM pg_owners WHERE id = $1', [id]);
+        if (ownerResult.rows.length === 0) {
+            return res.json({ totalPGs: 0, totalCustomers: 0, totalEarnings: 0, paidPayments: 0, pendingPayments: 0 });
+        }
+        const ownerEmail = ownerResult.rows[0].email;
+        
+        // Get PGs for this owner by email
+        const pgsResult = await pool.query('SELECT id FROM pg_listings WHERE LOWER(owner_email) = LOWER($1)', [ownerEmail]);
         const pgIds = pgsResult.rows.map(pg => pg.id);
         
         let totalCustomers = 0;
@@ -761,8 +795,15 @@ app.get('/api/owner/:id/stats', async (req, res) => {
 app.get('/api/owner/:id/payments', async (req, res) => {
     const { id } = req.params;
     try {
-        // Get PGs for this owner
-        const pgsResult = await pool.query('SELECT id FROM pg_listings WHERE owner_id = $1', [id]);
+        // Get owner email first
+        const ownerResult = await pool.query('SELECT email FROM pg_owners WHERE id = $1', [id]);
+        if (ownerResult.rows.length === 0) {
+            return res.json({ customers: [], totalEarnings: 0, paidCount: 0, dueCount: 0 });
+        }
+        const ownerEmail = ownerResult.rows[0].email;
+        
+        // Get PGs for this owner by email
+        const pgsResult = await pool.query('SELECT id FROM pg_listings WHERE LOWER(owner_email) = LOWER($1)', [ownerEmail]);
         const pgIds = pgsResult.rows.map(pg => pg.id);
         
         if (pgIds.length === 0) {
@@ -808,8 +849,15 @@ app.get('/api/owner/:id/payments', async (req, res) => {
 app.get('/api/owner/:id/visits', async (req, res) => {
     const { id } = req.params;
     try {
-        // Get PGs for this owner
-        const pgsResult = await pool.query('SELECT id FROM pg_listings WHERE owner_id = $1', [id]);
+        // Get owner email first
+        const ownerResult = await pool.query('SELECT email FROM pg_owners WHERE id = $1', [id]);
+        if (ownerResult.rows.length === 0) {
+            return res.json([]);
+        }
+        const ownerEmail = ownerResult.rows[0].email;
+        
+        // Get PGs for this owner by email
+        const pgsResult = await pool.query('SELECT id FROM pg_listings WHERE LOWER(owner_email) = LOWER($1)', [ownerEmail]);
         const pgIds = pgsResult.rows.map(pg => pg.id);
         
         if (pgIds.length === 0) {
@@ -919,13 +967,24 @@ app.get('/api/geocode', async (req, res) => {
 
 // Get PGs
 app.get('/api/pg', async (req, res) => {
-    const { owner_id } = req.query;
+    const { owner_id, owner_email } = req.query;
     try {
         let query = 'SELECT * FROM pg_listings';
         let values = [];
-        if (owner_id) {
-            query += ' WHERE owner_id = $1';
-            values.push(owner_id);
+        
+        // Prefer email-based matching
+        if (owner_email) {
+            query += ' WHERE LOWER(owner_email) = LOWER($1)';
+            values.push(owner_email);
+        } else if (owner_id) {
+            // Get owner's email from ID, then filter by email
+            const ownerResult = await pool.query('SELECT email FROM pg_owners WHERE id = $1', [owner_id]);
+            if (ownerResult.rows.length > 0) {
+                query += ' WHERE LOWER(owner_email) = LOWER($1)';
+                values.push(ownerResult.rows[0].email);
+            } else {
+                return res.json([]);
+            }
         }
         query += ' ORDER BY created_at DESC';
         const result = await pool.query(query, values);
@@ -1033,7 +1092,8 @@ app.post('/api/chat', async (req, res) => {
         // Build PG context string (concise format for speed)
         const pgContext = pgs.map(pg => 
             `ID:${pg.id}|${pg.title}|₹${pg.price}/mo|${pg.location},${pg.city}|${pg.gender || 'Any'}|Food:${pg.food_included ? 'Yes' : 'No'}|Rating:${pg.rating || 'New'}`
-        ).join('\n');
+        ).join('
+');
 
         // Fetch user booking if email provided
         let bookingContext = '';
@@ -1077,11 +1137,13 @@ USER'S BOOKING:
                 `, [userEmail]);
 
                 if (visitResult.rows.length > 0) {
-                    visitContext = '\nUSER\'S SCHEDULED VISITS:';
+                    visitContext = '
+USER\'S SCHEDULED VISITS:';
                     visitResult.rows.forEach(v => {
                         const statusLabel = v.status === 'pending' ? 'Waiting for approval' :
                                             v.status === 'approved' ? 'Approved ✓' : 'Not approved ✗';
-                        visitContext += `\n- ${v.pg_title}: ${new Date(v.visit_date).toLocaleDateString()} at ${v.visit_time} - ${statusLabel}`;
+                        visitContext += `
+- ${v.pg_title}: ${new Date(v.visit_date).toLocaleDateString()} at ${v.visit_time} - ${statusLabel}`;
                     });
                 }
             } catch (visitError) {
@@ -1100,7 +1162,9 @@ RULES:
 5. For booking/visit queries, use the user's info below
 6. If asked about non-PG topics, politely redirect to PG-related help
 
-${bookingContext ? `${bookingContext}\n` : ''}${visitContext ? `${visitContext}\n` : ''}
+${bookingContext ? `${bookingContext}
+` : ''}${visitContext ? `${visitContext}
+` : ''}
 AVAILABLE PGs (ID|Name|Price|Location|Gender|Food|Rating):
 ${pgContext}
 
