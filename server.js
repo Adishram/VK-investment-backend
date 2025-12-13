@@ -1092,8 +1092,7 @@ app.post('/api/chat', async (req, res) => {
         // Build PG context string (concise format for speed)
         const pgContext = pgs.map(pg => 
             `ID:${pg.id}|${pg.title}|₹${pg.price}/mo|${pg.location},${pg.city}|${pg.gender || 'Any'}|Food:${pg.food_included ? 'Yes' : 'No'}|Rating:${pg.rating || 'New'}`
-        ).join('
-');
+        ).join('\n');
 
         // Fetch user booking if email provided
         let bookingContext = '';
@@ -1137,8 +1136,7 @@ USER'S BOOKING:
                 `, [userEmail]);
 
                 if (visitResult.rows.length > 0) {
-                    visitContext = '
-USER\'S SCHEDULED VISITS:';
+                    visitContext = '\nUSER\'S SCHEDULED VISITS:';
                     visitResult.rows.forEach(v => {
                         const statusLabel = v.status === 'pending' ? 'Waiting for approval' :
                                             v.status === 'approved' ? 'Approved ✓' : 'Not approved ✗';
