@@ -998,25 +998,25 @@ app.get('/api/pg', async (req, res) => {
 app.post('/api/pg', async (req, res) => {
     const { 
         title, description, price, location, latitude, longitude, image_url, owner_contact,
-        house_no, street, city, pincode,
+        street, city, pincode,
         occupancy_types, occupancy_prices, food_included, notice_period, gate_close_time, safety_deposit,
-        amenities, rules, rooms, images, owner_id, owner_email, gender
+        amenities, rules, rooms, images, owner_email, gender
     } = req.body;
 
     try {
         const query = `
       INSERT INTO pg_listings (
         title, description, price, location, latitude, longitude, image_url, owner_contact,
-        house_no, street, city, pincode,
+        street, city, pincode,
         occupancy_types, occupancy_prices, food_included, notice_period, gate_close_time, safety_deposit,
-        amenities, rules, rooms, images, owner_id, owner_email, gender
+        amenities, rules, rooms, images, owner_email, gender
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
       RETURNING *;
     `;
         const values = [
             title, description, price, location, latitude, longitude, image_url, owner_contact,
-            house_no, street, city, pincode,
+            street, city, pincode,
             JSON.stringify(occupancy_types || []),
             JSON.stringify(occupancy_prices || {}),
             food_included || false,
@@ -1026,8 +1026,7 @@ app.post('/api/pg', async (req, res) => {
             JSON.stringify(amenities || []),
             JSON.stringify(rules || []),
             JSON.stringify(rooms || []),
-            JSON.stringify(images || []),
-            owner_id || null,
+            images || [],
             owner_email || null,
             gender || 'unisex'
         ];
