@@ -402,7 +402,7 @@ app.get('/api/super-admin/availability', async (req, res) => {
         // First get all PGs
         let query = `
             SELECT p.id, p.title, p.price, p.city, p.street as locality, p.food_included, p.occupancy_types,
-                   p.rooms, p.gender, p.owner_contact, p.owner_email, p.owner_id
+                   p.rooms, p.gender, p.owner_contact, p.owner_email
             FROM pg_listings p
             WHERE 1=1
         `;
@@ -434,7 +434,9 @@ app.get('/api/super-admin/availability', async (req, res) => {
         // Get all owners for lookup
         const ownersResult = await pool.query('SELECT id, name, email, mobile FROM pg_owners');
         const ownersMap = {};
-        ownersResult.rows.forEach(o => { ownersMap[o.id] = o; });
+        ownersResult.rows.forEach(o => { 
+            if (o.email) ownersMap[o.email.toLowerCase()] = o; 
+        });
         
         // Get customer counts for each PG
         const pgsWithCounts = await Promise.all(pgResult.rows.map(async (pg) => {
@@ -442,8 +444,8 @@ app.get('/api/super-admin/availability', async (req, res) => {
             const customerCount = parseInt(countResult.rows[0].count) || 0;
             
             // Get owner info
-            const ownerId = pg.owner_id ? parseInt(pg.owner_id) : null;
-            const owner = ownerId ? ownersMap[ownerId] : null;
+            const ownerEmail = pg.owner_email ? pg.owner_email.toLowerCase() : null;
+            const owner = ownerEmail ? ownersMap[ownerEmail] : null;
             
             // Parse rooms JSON to get room breakdown
             let roomBreakdown = { single: 0, double: 0, triple: 0, total: 0 };
@@ -527,7 +529,7 @@ app.post('/api/super-admin/notify-payment', async (req, res) => {
     try {
         // Get all customers grouped by PG
         const customersResult = await pool.query(`
-            SELECT c.*, p.title as pg_title, p.id as pg_id, p.owner_id
+            SELECT c.*, p.title as pg_title, p.id as pg_id, p.owner_email
             FROM customers c
             JOIN pg_listings p ON c.pg_id = p.id
         `);
@@ -539,7 +541,7 @@ app.post('/api/super-admin/notify-payment', async (req, res) => {
                 pgCustomers[customer.pg_id] = {
                     pgId: customer.pg_id,
                     pgTitle: customer.pg_title,
-                    ownerId: customer.owner_id,
+                    ownerEmail: customer.owner_email,
                     customers: []
                 };
             }
@@ -557,9 +559,12 @@ app.post('/api/super-admin/notify-payment', async (req, res) => {
             if (dueCustomers.length > 0) {
                 // Create announcement
                 const message = `📢 Payment Reminder: Dear residents, this is a friendly reminder to pay your monthly rent. ${dueCustomers.length} payment(s) pending. Please clear your dues at the earliest. Thank you!`;
+                
+                // If owner_email is missing, we can't create announcement or should handle gracefully. 
+                // But simplified: pass null if missing.
                 await pool.query(
-                    'INSERT INTO announcements (pg_id, owner_id, message) VALUES ($1, $2, $3)',
-                    [pgData.pgId, pgData.ownerId || '1', message]
+                    'INSERT INTO announcements (pg_id, owner_email, message) VALUES ($1, $2, $3)',
+                    [pgData.pgId, pgData.ownerEmail || null, message]
                 );
                 announcementsCreated++;
                 
@@ -1209,11 +1214,11 @@ ${city ? `User's current city filter: ${city}` : ''}`;
 
 // Create Announcement (Owner)
 app.post('/api/owner/announcement', async (req, res) => {
-    const { pgId, ownerId, message } = req.body;
+    const { pgId, ownerEmail, message } = req.body;
     try {
         const result = await pool.query(
-            'INSERT INTO announcements (pg_id, owner_id, message) VALUES ($1, $2, $3) RETURNING *',
-            [pgId, ownerId, message]
+            'INSERT INTO announcements (pg_id, owner_email, message) VALUES ($1, $2, $3) RETURNING *',
+            [pgId, ownerEmail, message]
         );
         res.status(201).json(result.rows[0]);
     } catch (error) {
